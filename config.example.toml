@@ -1,0 +1,13 @@
+# Copy to ~/.config/poe2market/config.toml
+
+# Your POESESSID cookie from pathofexile.com (grab from browser devtools)
+poesessid = ""
+
+# Trade league to search
+league = "Fate of the Vaal"
+
+# How long to cache API responses (hours)
+cache_ttl_hours = 24
+
+# Max items to fetch per search (more = slower but better regression)
+max_fetch_items = 200
