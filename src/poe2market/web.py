@@ -11,6 +11,7 @@ from .api import (
     build_search_query,
     find_stats,
     parse_listing,
+    resolve_stat,
 )
 from .cache import Cache
 from .config import Config
@@ -43,6 +44,8 @@ def get_config() -> dict:
         "league": cfg.league,
         "cache_ttl_hours": cfg.cache_ttl_hours,
         "max_fetch_items": cfg.max_fetch_items,
+        "anthropic_key_set": bool(cfg.anthropic_api_key),
+        "anthropic_model": cfg.anthropic_model,
     }
 
 
@@ -50,6 +53,8 @@ class ConfigUpdate(BaseModel):
     poesessid: str | None = None
     league: str | None = None
     max_fetch_items: int | None = None
+    anthropic_api_key: str | None = None
+    anthropic_model: str | None = None
 
 
 @app.post("/api/config")
@@ -61,6 +66,10 @@ def update_config(update: ConfigUpdate) -> dict:
         cfg.league = update.league
     if update.max_fetch_items is not None:
         cfg.max_fetch_items = update.max_fetch_items
+    if update.anthropic_api_key is not None:
+        cfg.anthropic_api_key = update.anthropic_api_key
+    if update.anthropic_model is not None:
+        cfg.anthropic_model = update.anthropic_model
     cfg.save()
     return {"status": "saved"}
 
@@ -289,6 +298,143 @@ def deals_endpoint(req: DealsRequest) -> dict:
             }
             for d in ranked[: req.limit]
         ],
+    }
+
+
+# ── prompt interpretation ──────────────────────────────────────────────
+
+
+class InterpretRequest(BaseModel):
+    prompt: str
+
+
+class _InterpretedStat(BaseModel):
+    query: str
+    weight: float = 1.0
+    min_value: float | None = None
+
+
+class _InterpretedSearch(BaseModel):
+    category: str
+    stats: list[_InterpretedStat]
+    min_price: float | None = None
+    max_price: float | None = None
+    limit: int = 20
+    explanation: str
+
+
+INTERPRET_SYSTEM = """You are a Path of Exile 2 trade search assistant. Convert \
+the user's plain-English item description into structured search parameters for \
+the poe2market tool, which ranks items by weighted stat value per chaos orb.
+
+Rules:
+- `category` MUST be one of the valid category IDs listed below. Pick the most \
+specific one that matches the user's intent.
+- `stats` is a list of desired stats:
+    - `query` is a human-readable stat name ("maximum life", "fire resistance", \
+"spell damage"). The tool fuzzy-matches this to the actual PoE2 stat ID, so use \
+the natural phrasing that appears on items.
+    - `weight` is relative importance (1.0 baseline; 3.0 means "three times as \
+important as weight 1"). Infer from emphasis in the prompt.
+    - `min_value` is optional; only set when the user explicitly specifies a \
+minimum.
+- `min_price` / `max_price` in chaos orbs; only set when specified.
+- `limit` defaults to 20.
+- `explanation` is a one-sentence summary of your interpretation.
+
+Valid categories:
+{categories}
+
+Common PoE2 stat names to use for queries (prefer pseudo-aggregated where it \
+makes sense):
+  maximum life, maximum mana, fire resistance, cold resistance, lightning \
+resistance, chaos resistance, spell damage, attack speed, cast speed, critical \
+strike chance, critical damage, armour, evasion rating, energy shield, \
+movement speed, rarity, rune sockets, spirit, accuracy rating, life regeneration
+"""
+
+
+@app.post("/api/interpret")
+def interpret_endpoint(req: InterpretRequest) -> dict:
+    cfg = Config.load()
+    if not cfg.anthropic_api_key:
+        raise HTTPException(
+            401,
+            "Anthropic API key not configured. Set it in Settings or the "
+            "ANTHROPIC_API_KEY env var.",
+        )
+
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(500, "anthropic package not installed") from None
+
+    # Build the category context
+    categories = get_categories()
+    valid_values = {c["value"] for c in categories}
+    cat_text = "\n".join(f"  {c['value']}: {c['label']}" for c in categories)
+    system = INTERPRET_SYSTEM.format(categories=cat_text)
+
+    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+
+    try:
+        response = client.messages.parse(
+            model=cfg.anthropic_model,
+            max_tokens=2048,
+            system=system,
+            messages=[{"role": "user", "content": req.prompt}],
+            output_format=_InterpretedSearch,
+        )
+    except anthropic.AuthenticationError:
+        raise HTTPException(401, "Invalid Anthropic API key") from None
+    except anthropic.RateLimitError:
+        raise HTTPException(429, "Anthropic rate limit hit; try again in a moment") from None
+    except anthropic.APIStatusError as e:
+        raise HTTPException(502, f"Anthropic API error: {e.message}") from None
+
+    parsed: _InterpretedSearch = response.parsed_output
+
+    if parsed.category not in valid_values:
+        raise HTTPException(
+            400,
+            f"Model returned unknown category '{parsed.category}'. "
+            "Try a more specific prompt or pick a category manually.",
+        )
+
+    # Resolve stat queries → stat IDs via cached stats data
+    cache = Cache(cfg.cache_dir, cfg.cache_ttl_hours)
+    stats_data = cache.get("stats_data")
+    if stats_data is None:
+        with TradeAPI(cfg) as tapi:
+            stats_data = tapi.get_stats()
+        cache.set("stats_data", stats_data)
+
+    resolved: list[dict] = []
+    unresolved: list[str] = []
+    for s in parsed.stats:
+        result = resolve_stat(s.query, stats_data)
+        if result is None:
+            unresolved.append(s.query)
+            continue
+        stat_id, text = result
+        resolved.append(
+            {
+                "stat_id": stat_id,
+                "text": text,
+                "weight": s.weight,
+                "min_value": s.min_value,
+                "original_query": s.query,
+            }
+        )
+
+    return {
+        "category": parsed.category,
+        "stats": resolved,
+        "unresolved_stats": unresolved,
+        "min_price": parsed.min_price,
+        "max_price": parsed.max_price,
+        "limit": parsed.limit,
+        "explanation": parsed.explanation,
     }
 
 

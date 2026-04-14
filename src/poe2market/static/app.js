@@ -12,7 +12,14 @@ function app() {
       league: '',
       cache_ttl_hours: 24,
       max_fetch_items: 200,
+      anthropic_key_set: false,
+      anthropic_model: 'claude-opus-4-6',
     },
+
+    promptText: '',
+    interpreting: false,
+    interpretation: '',
+    unresolvedStats: [],
 
     categories: [],
     leagues: [],
@@ -38,6 +45,8 @@ function app() {
       poesessid: '',
       league: '',
       max_fetch_items: 200,
+      anthropic_api_key: '',
+      anthropic_model: '',
       saved: false,
       showSessid: false,
     },
@@ -51,6 +60,7 @@ function app() {
       await this.loadConfig();
       this.settingsForm.league = this.config.league;
       this.settingsForm.max_fetch_items = this.config.max_fetch_items;
+      this.settingsForm.anthropic_model = this.config.anthropic_model;
       this.addStat();
       if (this.config.poesessid_set) {
         this.loadCategories();
@@ -249,6 +259,8 @@ function app() {
       if (this.settingsForm.poesessid) payload.poesessid = this.settingsForm.poesessid;
       if (this.settingsForm.league) payload.league = this.settingsForm.league;
       if (this.settingsForm.max_fetch_items) payload.max_fetch_items = this.settingsForm.max_fetch_items;
+      if (this.settingsForm.anthropic_api_key) payload.anthropic_api_key = this.settingsForm.anthropic_api_key;
+      if (this.settingsForm.anthropic_model) payload.anthropic_model = this.settingsForm.anthropic_model;
 
       try {
         await this.api('/api/config', {
@@ -256,12 +268,49 @@ function app() {
           body: JSON.stringify(payload),
         });
         this.settingsForm.poesessid = '';
+        this.settingsForm.anthropic_api_key = '';
         this.settingsForm.saved = true;
         setTimeout(() => { this.settingsForm.saved = false; }, 2000);
         await this.loadConfig();
         this.loadCategories();
         this.loadLeagues();
       } catch (e) {}
+    },
+
+    async interpretPrompt() {
+      if (!this.promptText || !this.config.anthropic_key_set) return;
+      this.interpreting = true;
+      this.interpretation = '';
+      this.unresolvedStats = [];
+      this.errorMessage = '';
+
+      try {
+        const result = await this.api('/api/interpret', {
+          method: 'POST',
+          body: JSON.stringify({ prompt: this.promptText }),
+        });
+
+        this.dealsForm.category = result.category;
+        this.dealsForm.stats = result.stats.map(s => {
+          const stat = this.makeStat();
+          stat.stat_id = s.stat_id;
+          stat.text = s.text;
+          stat.query = s.text;
+          stat.weight = s.weight;
+          stat.min_value = s.min_value;
+          return stat;
+        });
+        if (this.dealsForm.stats.length === 0) this.addStat();
+
+        this.dealsForm.min_price = result.min_price;
+        this.dealsForm.max_price = result.max_price;
+        this.dealsForm.limit = result.limit || 20;
+
+        this.interpretation = result.explanation;
+        this.unresolvedStats = result.unresolved_stats || [];
+      } finally {
+        this.interpreting = false;
+      }
     },
 
     async clearCache() {

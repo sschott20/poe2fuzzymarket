@@ -38,6 +38,39 @@
       <h2>Find Best-Value Items</h2>
       <p class="muted">Specify stats you care about with importance weights. Items are ranked by weighted stat score ÷ chaos-equivalent price.</p>
 
+      <!-- AI prompt box -->
+      <div class="prompt-section">
+        <label>Or describe it in plain English (Claude fills the form)</label>
+        <div class="prompt-row">
+          <textarea
+            x-model="promptText"
+            placeholder="e.g., body armour with lots of life and fire resistance, under 300 chaos"
+            rows="2"
+            @keydown.ctrl.enter="interpretPrompt()"
+            @keydown.meta.enter="interpretPrompt()"></textarea>
+          <button
+            class="primary"
+            @click="interpretPrompt()"
+            :disabled="!promptText || interpreting || !config.anthropic_key_set">
+            <span x-show="!interpreting">Interpret</span>
+            <span x-show="interpreting"><span class="spinner"></span> Thinking…</span>
+          </button>
+        </div>
+        <p class="muted small" x-show="!config.anthropic_key_set">
+          Set an Anthropic API key in
+          <a href="#" @click.prevent="tab='settings'">Settings</a>
+          to enable this.
+        </p>
+        <div class="banner info" x-show="interpretation" x-transition>
+          <span><strong>Interpreted:</strong> <span x-text="interpretation"></span></span>
+          <button class="close" @click="interpretation = ''">×</button>
+        </div>
+        <div class="banner warning" x-show="unresolvedStats.length > 0">
+          Couldn't resolve these stats — you may need to add them manually:
+          <span x-text="unresolvedStats.join(', ')"></span>
+        </div>
+      </div>
+
       <div class="form-group">
         <label>Category</label>
         <select x-model="dealsForm.category">
@@ -303,6 +336,24 @@
         <label>Max items to fetch per search</label>
         <input type="number" x-model.number="settingsForm.max_fetch_items" min="10" max="1000">
         <p class="muted small">More items = better regression/more deals, but slower (rate-limited API).</p>
+      </div>
+
+      <div class="form-group">
+        <label>Anthropic API Key</label>
+        <p class="muted small">
+          For the prompt-to-params feature on the Deals tab. Get a key at
+          console.anthropic.com. Stored locally; also reads ANTHROPIC_API_KEY env var.
+        </p>
+        <input
+          type="password"
+          x-model="settingsForm.anthropic_api_key"
+          :placeholder="config.anthropic_key_set ? '(set)' : 'not set'">
+      </div>
+
+      <div class="form-group">
+        <label>Anthropic model</label>
+        <input type="text" x-model="settingsForm.anthropic_model" placeholder="claude-opus-4-6">
+        <p class="muted small">Default: claude-opus-4-6. Use claude-haiku-4-5 for faster/cheaper interpretation.</p>
       </div>
 
       <div class="submit-row">

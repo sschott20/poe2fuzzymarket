@@ -111,11 +111,65 @@ main { padding: 24px 0 60px; min-height: calc(100vh - 120px); }
 .banner.warning { background: rgba(217, 166, 87, 0.1); border: 1px solid var(--warn); color: var(--warn); }
 .banner.error { background: rgba(197, 107, 107, 0.1); border: 1px solid var(--bad); color: var(--bad); }
 .banner.success { background: rgba(123, 182, 106, 0.1); border: 1px solid var(--good); color: var(--good); }
+.banner.info { background: rgba(110, 163, 212, 0.1); border: 1px solid var(--info); color: var(--info); }
 
 .banner a { color: inherit; font-weight: 600; }
 .banner .close {
   background: none; border: none; color: inherit; cursor: pointer;
   font-size: 18px; padding: 0 6px;
+}
+
+/* AI prompt section */
+.prompt-section {
+  background: linear-gradient(135deg, rgba(110, 163, 212, 0.04), rgba(212, 169, 94, 0.04));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 24px;
+}
+
+.prompt-section > label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.prompt-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.prompt-row textarea {
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  resize: vertical;
+  min-height: 60px;
+}
+
+.prompt-row textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.prompt-row button {
+  min-width: 130px;
+  align-self: stretch;
+}
+
+.prompt-section .banner {
+  margin-top: 10px;
+  margin-bottom: 0;
 }
 
 /* Forms */

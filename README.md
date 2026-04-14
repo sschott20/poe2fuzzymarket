@@ -39,9 +39,13 @@ poe2market serve
 
 Opens a local web interface at `http://localhost:8000` with three tabs:
 
-- **Find Deals** — pick a category, search for stats (with autocomplete), set importance weights, and get a ranked list of best-value listings with stat contribution breakdown and one-click whisper copy.
+- **Find Deals** — pick a category, search for stats (with autocomplete), set importance weights, and get a ranked list of best-value listings with stat contribution breakdown and one-click whisper copy. Includes a natural-language prompt box ("body armour with high life and fire resistance under 300 chaos") that uses Claude to fill in the form automatically.
 - **Analyze Market** — see a visual breakdown of which stats are driving prices, with regression bars showing relative impact.
-- **Settings** — configure POESESSID, league, cache.
+- **Settings** — configure POESESSID, league, cache, Anthropic API key.
+
+### Prompt interpretation (optional)
+
+Set an Anthropic API key in Settings (or the `ANTHROPIC_API_KEY` env var) to enable the prompt box on the Deals tab. Type what you want in plain English and Claude picks the category, maps stats with weights, and sets price filters. Defaults to `claude-opus-4-6`; override with any model ID (e.g. `claude-haiku-4-5`) in Settings.
 
 Flags: `--host`, `--port`, `--no-open` (don't open browser), `--reload` (auto-reload on changes).
 
