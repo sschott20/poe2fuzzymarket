@@ -310,24 +310,22 @@ def _parse_item_stats(item: dict) -> list[StatValue]:
         mod_hashes = hashes.get(mod_type, [])
         mod_texts = item.get(mod_key, [])
 
-        for hash_entry in mod_hashes:
-            if not isinstance(hash_entry, list) or len(hash_entry) < 2:
+        for i, hash_entry in enumerate(mod_hashes):
+            if not isinstance(hash_entry, list) or not hash_entry:
                 continue
             stat_id = hash_entry[0]
-            indices = hash_entry[1]
-
-            for idx in indices:
-                if idx < len(mod_texts):
-                    text = mod_texts[idx]
-                    value = extract_number(text)
-                    if value is not None:
-                        stats.append(
-                            StatValue(
-                                stat_id=f"{mod_type}.{stat_id}",
-                                text=text,
-                                value=value,
-                            )
-                        )
+            if i >= len(mod_texts):
+                continue
+            text = mod_texts[i]
+            value = extract_number(text)
+            if value is not None:
+                stats.append(
+                    StatValue(
+                        stat_id=stat_id,
+                        text=text,
+                        value=value,
+                    )
+                )
     return stats
 
 

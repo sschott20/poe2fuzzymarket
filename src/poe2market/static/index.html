@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>poe2market</title>
   <link rel="stylesheet" href="/static/style.css">
-  <script defer src="https://unpkg.com/alpinejs@3.13.3/dist/cdn.min.js"></script>
   <script defer src="/static/app.js"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.13.3/dist/cdn.min.js"></script>
 </head>
-<body x-data="app()" x-init="init()" x-cloak>
+<body x-data="app()" x-cloak>
 
   <header>
     <div class="container header-inner">
@@ -135,7 +135,7 @@
         </p>
 
         <div class="deals-grid">
-          <template x-for="(deal, i) in dealsResult.deals" :key="deal.item_id">
+          <template x-for="(deal, i) in (dealsResult?.deals || [])" :key="deal.item_id">
             <div class="deal-card" :class="{'top-deal': i === 0}">
               <div class="deal-header">
                 <div class="rank">#<span x-text="i + 1"></span></div>
@@ -250,7 +250,7 @@
         </p>
 
         <div class="coeff-list">
-          <template x-for="c in analyzeResult.coefficients" :key="c.stat_id">
+          <template x-for="c in (analyzeResult?.coefficients || [])" :key="c.stat_id">
             <div class="coeff-row">
               <div class="coeff-text" x-text="c.text"></div>
               <div class="coeff-bar-wrap">

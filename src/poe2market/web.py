@@ -94,40 +94,41 @@ def get_leagues() -> list:
 
 @app.get("/api/categories")
 def get_categories() -> list[dict]:
-    """Return flattened category options suitable for a dropdown."""
+    """Return category filter options pulled from the trade filters endpoint."""
     cfg = Config.load()
     cache = Cache(cfg.cache_dir, cfg.cache_ttl_hours)
 
-    cached = cache.get("items_data")
+    cached = cache.get("filter_categories")
     if cached is not None:
-        items_data = cached
-    else:
-        with TradeAPI(cfg) as tapi:
-            items_data = tapi.get_items()
-        cache.set("items_data", items_data)
+        return cached
 
-    # Build flat list: [{value: "armour.body", label: "Body Armour", group: "Armour"}, ...]
-    options: list[dict] = []
-    for group in items_data:
-        group_id = group.get("id", "")
-        group_label = group.get("label", group_id)
-        for entry in group.get("entries", []):
-            value = group_id
-            type_name = entry.get("type", "")
-            options.append({
-                "value": value,
-                "label": type_name,
-                "group": group_label,
-            })
+    with TradeAPI(cfg) as tapi:
+        resp = tapi.client.get("/api/trade2/data/filters")
+        resp.raise_for_status()
+        filters = resp.json().get("result", [])
 
-    # De-dup by value keeping first occurrence
-    seen: set[str] = set()
-    unique_options: list[dict] = []
-    for opt in options:
-        if opt["value"] not in seen:
-            seen.add(opt["value"])
-            unique_options.append(opt)
-    return unique_options
+    category_options: list[dict] = []
+    for group in filters:
+        if group.get("id") != "type_filters":
+            continue
+        for f in group.get("filters", []):
+            if f.get("id") != "category":
+                continue
+            for opt in f.get("option", {}).get("options", []):
+                value = opt.get("id")
+                text = opt.get("text", "")
+                if value is None or value == "":
+                    continue  # skip "Any" entry
+                # Group by top-level prefix for dropdown optgroup
+                top = value.split(".", 1)[0] if "." in value else value
+                category_options.append({
+                    "value": value,
+                    "label": text,
+                    "group": top.capitalize(),
+                })
+
+    cache.set("filter_categories", category_options)
+    return category_options
 
 
 @app.get("/api/stats")
