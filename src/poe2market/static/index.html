@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>poe2market</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="https://unpkg.com/alpinejs@3.13.3/dist/cdn.min.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body x-data="app()" x-init="init()" x-cloak>
+
+  <header>
+    <div class="container header-inner">
+      <h1>poe2market</h1>
+      <nav>
+        <button @click="tab = 'deals'" :class="{active: tab === 'deals'}">Find Deals</button>
+        <button @click="tab = 'analyze'" :class="{active: tab === 'analyze'}">Analyze Market</button>
+        <button @click="tab = 'settings'" :class="{active: tab === 'settings'}">Settings</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <div class="banner warning" x-show="!config.poesessid_set && tab !== 'settings'">
+      POESESSID not configured.
+      <a href="#" @click.prevent="tab = 'settings'">Set it in Settings →</a>
+    </div>
+
+    <div class="banner error" x-show="errorMessage" x-transition>
+      <span x-text="errorMessage"></span>
+      <button class="close" @click="errorMessage = ''">×</button>
+    </div>
+
+    <!-- ── FIND DEALS ────────────────────────────────────────────── -->
+    <section class="panel" x-show="tab === 'deals'">
+      <h2>Find Best-Value Items</h2>
+      <p class="muted">Specify stats you care about with importance weights. Items are ranked by weighted stat score ÷ chaos-equivalent price.</p>
+
+      <div class="form-group">
+        <label>Category</label>
+        <select x-model="dealsForm.category">
+          <option value="">Select a category...</option>
+          <template x-for="group in categoryGroups" :key="group.name">
+            <optgroup :label="group.name">
+              <template x-for="opt in group.items" :key="opt.value + opt.label">
+                <option :value="opt.value" x-text="opt.label"></option>
+              </template>
+            </optgroup>
+          </template>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Desired Stats</label>
+        <p class="muted small">Search for a stat, pick it from the dropdown, then set weight (importance) and optional minimum value.</p>
+
+        <div class="stats-list">
+          <template x-for="(stat, idx) in dealsForm.stats" :key="stat._key">
+            <div class="stat-row">
+              <div class="stat-search">
+                <input type="text"
+                       placeholder="Search stat..."
+                       x-model="stat.query"
+                       @input.debounce.300ms="searchStatsFor(idx)"
+                       @focus="stat.showSuggestions = true"
+                       x-show="!stat.stat_id">
+                <div class="autocomplete"
+                     x-show="stat.showSuggestions && stat.suggestions.length > 0 && !stat.stat_id">
+                  <template x-for="s in stat.suggestions" :key="s.id">
+                    <div class="suggestion" @click="selectStat(idx, s)">
+                      <span x-text="s.text"></span>
+                      <small x-text="s.id"></small>
+                    </div>
+                  </template>
+                </div>
+                <div class="selected-stat" x-show="stat.stat_id">
+                  <div>
+                    <span x-text="stat.text"></span>
+                    <small x-text="stat.stat_id"></small>
+                  </div>
+                  <button @click="clearStat(idx)" class="icon-btn" title="Clear">×</button>
+                </div>
+              </div>
+              <div class="stat-inputs">
+                <label>
+                  <span>Weight</span>
+                  <input type="number" step="0.1" min="0" x-model.number="stat.weight">
+                </label>
+                <label>
+                  <span>Min</span>
+                  <input type="number" x-model.number="stat.min_value" placeholder="any">
+                </label>
+                <button @click="removeStat(idx)" class="icon-btn danger" title="Remove">🗑</button>
+              </div>
+            </div>
+          </template>
+        </div>
+        <button @click="addStat()" class="secondary small">+ Add Stat</button>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Min price (chaos)</label>
+          <input type="number" x-model.number="dealsForm.min_price" placeholder="any">
+        </div>
+        <div class="form-group">
+          <label>Max price (chaos)</label>
+          <input type="number" x-model.number="dealsForm.max_price" placeholder="any">
+        </div>
+        <div class="form-group">
+          <label>Max items to fetch</label>
+          <input type="number" x-model.number="dealsForm.max_items" placeholder="200">
+        </div>
+        <div class="form-group">
+          <label>Show top</label>
+          <input type="number" x-model.number="dealsForm.limit">
+        </div>
+      </div>
+
+      <div class="submit-row">
+        <button @click="runDeals()" :disabled="loading || !canRunDeals" class="primary">
+          <span x-show="!loading">Find Deals</span>
+          <span x-show="loading"><span class="spinner"></span> Searching… may take 30-60s</span>
+        </button>
+      </div>
+
+      <div class="results" x-show="dealsResult">
+        <h3>Results</h3>
+        <p class="muted small">
+          <span x-text="dealsResult?.listings_count"></span> listings fetched
+          ·
+          <span x-text="dealsResult?.deals?.length"></span> scored
+        </p>
+
+        <div class="deals-grid">
+          <template x-for="(deal, i) in dealsResult.deals" :key="deal.item_id">
+            <div class="deal-card" :class="{'top-deal': i === 0}">
+              <div class="deal-header">
+                <div class="rank">#<span x-text="i + 1"></span></div>
+                <div class="item-name">
+                  <div x-text="deal.name || deal.base_type" class="name-line"></div>
+                  <small x-text="deal.name ? deal.base_type : ('iLvl ' + deal.ilvl)"></small>
+                </div>
+                <div class="price-block">
+                  <div class="price">
+                    <span x-text="formatPrice(deal.price)"></span>
+                    <span class="currency" x-text="deal.currency"></span>
+                  </div>
+                  <small x-text="'~' + Math.round(deal.chaos_price) + 'c'"
+                         x-show="deal.currency !== 'chaos'"></small>
+                </div>
+              </div>
+
+              <div class="deal-metrics">
+                <div class="metric">
+                  <span class="metric-label">Score</span>
+                  <span class="metric-value" x-text="Math.round(deal.weighted_score)"></span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Value ratio</span>
+                  <span class="metric-value" :class="deal.value_ratio > 1 ? 'good' : 'ok'"
+                        x-text="deal.value_ratio.toFixed(2)"></span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Seller</span>
+                  <span class="metric-value small-text" x-text="deal.account"></span>
+                </div>
+              </div>
+
+              <div class="stat-contributions">
+                <div class="contrib-header">Stat contributions</div>
+                <template x-for="c in deal.contributions" :key="c.stat_id">
+                  <div class="contrib-bar">
+                    <div class="contrib-text" x-text="cleanStatText(c.text)"></div>
+                    <div class="contrib-value" x-text="Math.round(c.value)"></div>
+                  </div>
+                </template>
+              </div>
+
+              <div class="deal-actions">
+                <button class="small" @click="copyWhisper(deal.whisper)">Copy Whisper</button>
+                <button class="small secondary" @click="toggleAllStats(deal)">
+                  <span x-text="deal._showAll ? 'Hide all mods' : 'Show all mods'"></span>
+                </button>
+              </div>
+
+              <div class="all-stats" x-show="deal._showAll" x-transition>
+                <template x-for="s in deal.all_stats" :key="s.text">
+                  <div x-text="s.text"></div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── ANALYZE MARKET ────────────────────────────────────────── -->
+    <section class="panel" x-show="tab === 'analyze'">
+      <h2>Analyze Stat-Price Relationships</h2>
+      <p class="muted">Linear regression over current listings. Shows how much each stat point contributes to price on average.</p>
+
+      <div class="form-group">
+        <label>Category</label>
+        <select x-model="analyzeForm.category">
+          <option value="">Select a category...</option>
+          <template x-for="group in categoryGroups" :key="group.name">
+            <optgroup :label="group.name">
+              <template x-for="opt in group.items" :key="opt.value + opt.label">
+                <option :value="opt.value" x-text="opt.label"></option>
+              </template>
+            </optgroup>
+          </template>
+        </select>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Min price (chaos)</label>
+          <input type="number" x-model.number="analyzeForm.min_price" placeholder="any">
+        </div>
+        <div class="form-group">
+          <label>Max price (chaos)</label>
+          <input type="number" x-model.number="analyzeForm.max_price" placeholder="any">
+        </div>
+        <div class="form-group">
+          <label>Max items</label>
+          <input type="number" x-model.number="analyzeForm.max_items" placeholder="200">
+        </div>
+        <div class="form-group">
+          <label>Min occurrence (0-1)</label>
+          <input type="number" step="0.05" min="0" max="1" x-model.number="analyzeForm.min_occurrence">
+        </div>
+      </div>
+
+      <div class="submit-row">
+        <button @click="runAnalyze()" :disabled="loading || !analyzeForm.category" class="primary">
+          <span x-show="!loading">Analyze</span>
+          <span x-show="loading"><span class="spinner"></span> Analyzing…</span>
+        </button>
+      </div>
+
+      <div class="results" x-show="analyzeResult">
+        <h3>Stat Price Impact</h3>
+        <p class="muted small">
+          Based on <span x-text="analyzeResult?.listings_count"></span> listings.
+          Positive = stat increases price; negative = noise or inverse correlation.
+        </p>
+
+        <div class="coeff-list">
+          <template x-for="c in analyzeResult.coefficients" :key="c.stat_id">
+            <div class="coeff-row">
+              <div class="coeff-text" x-text="c.text"></div>
+              <div class="coeff-bar-wrap">
+                <div class="coeff-bar"
+                     :style="coeffBarStyle(c, analyzeResult.coefficients)"></div>
+              </div>
+              <div class="coeff-value" :class="c.coefficient > 0 ? 'good' : 'bad'">
+                <span x-text="(c.coefficient >= 0 ? '+' : '') + c.coefficient.toFixed(2)"></span>
+                <small>c/pt</small>
+              </div>
+              <div class="coeff-meta">
+                <small x-text="'±' + c.std_error.toFixed(1) + ' · n=' + c.sample_count"></small>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── SETTINGS ──────────────────────────────────────────────── -->
+    <section class="panel" x-show="tab === 'settings'">
+      <h2>Settings</h2>
+
+      <div class="form-group">
+        <label>POESESSID</label>
+        <p class="muted small">
+          Your session cookie from pathofexile.com. Grab it from browser DevTools →
+          Cookies → pathofexile.com → POESESSID. Never share this.
+        </p>
+        <div class="input-row">
+          <input type="password"
+                 x-model="settingsForm.poesessid"
+                 :placeholder="config.poesessid_set ? config.poesessid_preview : 'not set'">
+          <button class="secondary small" @click="settingsForm.showSessid = !settingsForm.showSessid">
+            <span x-text="settingsForm.showSessid ? 'Hide' : 'Show'"></span>
+          </button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>League</label>
+        <select x-model="settingsForm.league">
+          <template x-for="lg in leagues" :key="lg.id">
+            <option :value="lg.id" x-text="lg.id"></option>
+          </template>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Max items to fetch per search</label>
+        <input type="number" x-model.number="settingsForm.max_fetch_items" min="10" max="1000">
+        <p class="muted small">More items = better regression/more deals, but slower (rate-limited API).</p>
+      </div>
+
+      <div class="submit-row">
+        <button class="primary" @click="saveSettings()">Save Settings</button>
+        <button class="secondary" @click="clearCache()">Clear Cache</button>
+      </div>
+
+      <div class="banner success" x-show="settingsForm.saved" x-transition>
+        Saved.
+      </div>
+    </section>
+
+    <div x-show="settingsForm.showSessid" x-cloak style="display: none;">
+      <!-- Trick: we need a separate visible input when show is toggled.
+           But Alpine doesn't support dynamic input type easily; we use a second input. -->
+    </div>
+
+  </main>
+
+  <footer>
+    <div class="container">
+      <span class="muted small">poe2market · local only · not affiliated with GGG</span>
+    </div>
+  </footer>
+
+</body>
+</html>

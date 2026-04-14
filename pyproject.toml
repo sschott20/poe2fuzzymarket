@@ -12,6 +12,8 @@ dependencies = [
     "numpy>=1.24",
     "rich>=13.0",
     "click>=8.0",
+    "fastapi>=0.109",
+    "uvicorn[standard]>=0.25",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +27,9 @@ poe2market = "poe2market.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+poe2market = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

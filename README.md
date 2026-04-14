@@ -31,7 +31,21 @@ export POE2_SESSID="your_session_id_here"
 export POE2_LEAGUE="Fate of the Vaal"
 ```
 
-## Usage
+## Web UI
+
+```bash
+poe2market serve
+```
+
+Opens a local web interface at `http://localhost:8000` with three tabs:
+
+- **Find Deals** — pick a category, search for stats (with autocomplete), set importance weights, and get a ranked list of best-value listings with stat contribution breakdown and one-click whisper copy.
+- **Analyze Market** — see a visual breakdown of which stats are driving prices, with regression bars showing relative impact.
+- **Settings** — configure POESESSID, league, cache.
+
+Flags: `--host`, `--port`, `--no-open` (don't open browser), `--reload` (auto-reload on changes).
+
+## CLI Usage
 
 ### Search stats
 

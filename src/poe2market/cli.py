@@ -351,5 +351,34 @@ def deals(
         console.print(f"\n[dim]Whisper for #1:[/dim] {top.listing.whisper}")
 
 
+# ── serve ───────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--host", default="127.0.0.1", help="Host to bind.")
+@click.option("--port", default=8000, type=int, help="Port to bind.")
+@click.option("--reload", is_flag=True, help="Auto-reload on file changes.")
+@click.option("--open/--no-open", "open_browser", default=True, help="Open browser automatically.")
+def serve(host: str, port: int, reload: bool, open_browser: bool) -> None:
+    """Launch the local web UI."""
+    from . import web
+
+    url = f"http://{host}:{port}"
+    console.print(f"[green]Starting poe2market at[/green] [bold]{url}[/bold]")
+
+    if open_browser and not reload:
+        import threading
+        import time
+        import webbrowser
+
+        def _open() -> None:
+            time.sleep(1.0)
+            webbrowser.open(url)
+
+        threading.Thread(target=_open, daemon=True).start()
+
+    web.run(host=host, port=port, reload=reload)
+
+
 if __name__ == "__main__":
     main()
