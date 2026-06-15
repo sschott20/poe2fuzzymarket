@@ -10,18 +10,31 @@ from .api import (
     TradeAPI,
     build_search_query,
     find_stats,
+    is_offline,
     parse_listing,
     resolve_stat,
 )
 from .cache import Cache
 from .config import Config
+from .history import HistoryStore, summarize
 from .models import StatFilter
+from .observations import ObservationStore
 from .scorer import normalize_price, score_listings
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(title="poe2market", description="Weighted trade search for PoE2")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.middleware("http")
+async def _no_cache_assets(request, call_next):
+    """Tell the browser never to cache the UI assets, so code changes show up on
+    a normal refresh instead of silently running a stale app.js/index.html."""
+    resp = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static"):
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 # ── pages ──────────────────────────────────────────────────────────────
@@ -44,6 +57,7 @@ def get_config() -> dict:
         "league": cfg.league,
         "cache_ttl_hours": cfg.cache_ttl_hours,
         "max_fetch_items": cfg.max_fetch_items,
+        "auto_sync_minutes": cfg.auto_sync_minutes,
         "anthropic_key_set": bool(cfg.anthropic_api_key),
         "anthropic_model": cfg.anthropic_model,
     }
@@ -53,6 +67,7 @@ class ConfigUpdate(BaseModel):
     poesessid: str | None = None
     league: str | None = None
     max_fetch_items: int | None = None
+    auto_sync_minutes: int | None = None
     anthropic_api_key: str | None = None
     anthropic_model: str | None = None
 
@@ -66,6 +81,8 @@ def update_config(update: ConfigUpdate) -> dict:
         cfg.league = update.league
     if update.max_fetch_items is not None:
         cfg.max_fetch_items = update.max_fetch_items
+    if update.auto_sync_minutes is not None:
+        cfg.auto_sync_minutes = max(0, update.auto_sync_minutes)
     if update.anthropic_api_key is not None:
         cfg.anthropic_api_key = update.anthropic_api_key
     if update.anthropic_model is not None:
@@ -165,11 +182,26 @@ def search_stats_endpoint(q: str = "", limit: int = 30) -> list[dict]:
 
 class AnalyzeRequest(BaseModel):
     category: str
-    min_price: float | None = None
-    max_price: float | None = None
+    attributes: list[str] | None = None  # subset of str/dex/int base attributes
+    min_divine: float = 1.0  # floor of the sampled price range, in divine
     max_items: int | None = None
     min_occurrence: float = 0.1
-    online_only: bool = True
+    use_history: bool = True  # include accumulated saved observations
+
+
+def _analyze_bands(min_divine: float):
+    """Price bands (in DIVINE) for the regression sample, floored at
+    ``min_divine`` and fanning out so higher-value items are represented.
+    The price filter uses the "divine" option, so bands must be in divine.
+    """
+    floor = max(0.01, min_divine)
+    mults = [1, 2, 4, 8, 20, 60]
+    edges = [floor * m for m in mults]
+    bands = [(None, floor)]  # everything below the floor in one band
+    for i, lo in enumerate(edges):
+        hi = edges[i + 1] if i + 1 < len(edges) else None
+        bands.append((lo, hi))
+    return bands
 
 
 @app.post("/api/analyze")
@@ -178,24 +210,64 @@ def analyze_endpoint(req: AnalyzeRequest) -> dict:
     if not cfg.poesessid:
         raise HTTPException(401, "POESESSID not configured")
 
-    query = build_search_query(
-        category=req.category,
-        min_price=req.min_price,
-        max_price=req.max_price,
-        online_only=req.online_only,
-    )
+    rates = _exalted_rates(cfg)
+    divine_price = rates.get("divine", 1.0) or 1.0
+    bands = _analyze_bands(req.min_divine)
 
+    # Sample across price bands so the regression sees real price variance — a
+    # single price-sorted search only returns near-identical cheapest listings.
+    # search_and_fetch_price_diverse returns OFFLINE listings only.
     with TradeAPI(cfg) as tapi:
-        raw_items = tapi.search_and_fetch(query, req.max_items)
+        raw_items = tapi.search_and_fetch_price_diverse(
+            req.category,
+            max_items=req.max_items,
+            bands=bands,
+            attributes=req.attributes,
+        )
 
-    listings = [parse_listing(r) for r in raw_items]
+    # Save every fetched item so the sample accumulates across searches.
+    import time as _time
+
+    obs = ObservationStore(cfg.cache_dir)
+    obs.record(cfg.league, req.category, raw_items, _time.time())
+
+    fresh = [parse_listing(r) for r in raw_items]
+    if req.use_history:
+        # Regress over the full accumulated set for this category/attributes
+        # (includes the items we just fetched), not just this one search.
+        listings = obs.query(cfg.league, req.category, req.attributes)
+    else:
+        listings = fresh
+    saved_count = obs.count(cfg.league, req.category)
+
     if not listings:
-        return {"listings_count": 0, "coefficients": []}
+        return {
+            "listings_count": 0,
+            "coefficients": [],
+            "note": "No listings found for this category.",
+        }
 
-    coefficients = fit_price_model(listings, min_occurrence=req.min_occurrence)
+    prices = [normalize_price(l.price, l.currency, rates) for l in listings]
+    distinct = len({round(p, 1) for p in prices})
+    note = None
+    if distinct < 3:
+        note = (
+            "Not enough price variation in the sample to fit a reliable model — "
+            "this category may have too few or too uniformly-priced listings."
+        )
+
+    coefficients = fit_price_model(
+        listings, min_occurrence=req.min_occurrence, chaos_rates=rates
+    )
 
     return {
         "listings_count": len(listings),
+        "fetched_now": len(fresh),
+        "saved_total": saved_count,
+        "used_history": req.use_history,
+        "price_min": round(min(prices), 1) if prices else 0,
+        "price_max": round(max(prices), 1) if prices else 0,
+        "note": note,
         "coefficients": [
             {
                 "stat_id": c.stat_id,
@@ -222,11 +294,11 @@ class StatWeight(BaseModel):
 class DealsRequest(BaseModel):
     category: str
     stats: list[StatWeight]
-    min_price: float | None = None
-    max_price: float | None = None
+    attributes: list[str] | None = None  # subset of str/dex/int base attributes
+    min_price: float | None = None  # divine
+    max_price: float | None = None  # divine
     max_items: int | None = None
     limit: int = 20
-    online_only: bool = True
 
 
 @app.post("/api/deals")
@@ -248,14 +320,24 @@ def deals_endpoint(req: DealsRequest) -> dict:
         stat_filters=stat_filters,
         min_price=req.min_price,
         max_price=req.max_price,
-        online_only=req.online_only,
+        attributes=req.attributes,
     )
 
+    rates = _exalted_rates(cfg)
+    divine_price = rates.get("divine", 1.0) or 1.0
+
     with TradeAPI(cfg) as tapi:
-        raw_items = tapi.search_and_fetch(query, req.max_items)
+        raw_items = [r for r in tapi.search_and_fetch(query, req.max_items) if is_offline(r)]
+
+    # Save fetched items so they feed future analysis.
+    import time as _time
+
+    ObservationStore(cfg.cache_dir).record(
+        cfg.league, req.category, raw_items, _time.time()
+    )
 
     listings = [parse_listing(r) for r in raw_items]
-    ranked = score_listings(listings, weights)
+    ranked = score_listings(listings, weights, chaos_rates=rates)
 
     # Use actual mod text from items when available, fall back to stat filter label
     for listing in listings:
@@ -265,6 +347,7 @@ def deals_endpoint(req: DealsRequest) -> dict:
 
     return {
         "listings_count": len(listings),
+        "divine_price": divine_price,
         "deals": [
             {
                 "item_id": d.listing.item_id,
@@ -273,9 +356,12 @@ def deals_endpoint(req: DealsRequest) -> dict:
                 "ilvl": d.listing.ilvl,
                 "price": d.listing.price,
                 "currency": d.listing.currency,
-                "chaos_price": normalize_price(
-                    d.listing.price, d.listing.currency
+                "exalted_price": normalize_price(
+                    d.listing.price, d.listing.currency, rates
                 ),
+                "divine_price_eq": normalize_price(
+                    d.listing.price, d.listing.currency, rates
+                ) / divine_price,
                 "weighted_score": d.weighted_score,
                 "value_ratio": d.value_ratio,
                 "account": d.listing.account_name,
@@ -299,6 +385,281 @@ def deals_endpoint(req: DealsRequest) -> dict:
             for d in ranked[: req.limit]
         ],
     }
+
+
+# ── merchant history ───────────────────────────────────────────────────
+
+
+def _exalted_rates(cfg) -> dict:
+    """Live poe2scout exalted rates for the league, cached to avoid refetching.
+
+    Falls back to the static table inside fetch_exalted_rates on any failure.
+    """
+    cache = Cache(cfg.cache_dir, cfg.cache_ttl_hours)
+    cached = cache.get("exalted_rates")
+    if cached is not None:
+        return cached
+    from .stash import fetch_exalted_rates
+
+    rates, _divine = fetch_exalted_rates(league=cfg.league)
+    cache.set("exalted_rates", rates)
+    return rates
+
+
+def _sale_to_dict(sale, rates) -> dict:
+    return {
+        "sale_id": sale.sale_id,
+        "time": sale.time,
+        "amount": sale.amount,
+        "currency": sale.currency,
+        "exalted_value": round(sale.exalted_value(rates), 2),
+        "name": sale.name,
+        "base_type": sale.base_type,
+        "rarity": sale.rarity,
+        "ilvl": sale.ilvl,
+        "stack_size": sale.stack_size,
+        "icon": sale.icon,
+        "implicit_mods": sale.implicit_mods,
+        "explicit_mods": sale.explicit_mods,
+        "rune_mods": sale.rune_mods,
+        "enchant_mods": sale.enchant_mods,
+        "fractured_mods": sale.fractured_mods,
+        "properties": sale.properties,
+        "requirements": sale.requirements,
+        "has_detail": bool(
+            sale.explicit_mods
+            or sale.implicit_mods
+            or sale.rune_mods
+            or sale.enchant_mods
+            or sale.fractured_mods
+        ),
+    }
+
+
+# Last sync outcome, shared between the manual endpoint and the auto-sync loop
+# so the UI can show when data last refreshed and whether it succeeded.
+_sync_status: dict = {
+    "last_attempt": None,   # epoch seconds
+    "last_success": None,   # epoch seconds
+    "last_new": 0,
+    "total": 0,
+    "error": None,
+    "auto": False,          # whether the background loop is running
+}
+
+
+def _perform_sync(cfg) -> dict:
+    """Fetch the latest sales and merge them into the store. Raises on failure."""
+    store = HistoryStore(cfg.cache_dir)
+    with TradeAPI(cfg) as tapi:
+        raw_entries = tapi.get_history(cfg.league)
+    new_count = store.upsert_many(cfg.league, raw_entries)
+    return {
+        "league": cfg.league,
+        "fetched": len(raw_entries),
+        "new": new_count,
+        "total": store.count(cfg.league),
+    }
+
+
+@app.post("/api/history/sync")
+def sync_history() -> dict:
+    """Pull the latest sales from the trade API and merge into the local store.
+
+    Returns how many new sales were added and the running total for the league.
+    """
+    import time
+
+    cfg = Config.load()
+    if not cfg.poesessid:
+        raise HTTPException(401, "POESESSID not configured")
+
+    _sync_status["last_attempt"] = time.time()
+    try:
+        result = _perform_sync(cfg)
+    except Exception as e:  # surface API/auth/Cloudflare failures to the UI
+        import httpx
+
+        from .api import RateLimited
+
+        if isinstance(e, RateLimited):
+            mins = max(1, round(e.retry_after / 60))
+            _sync_status["error"] = "ratelimit"
+            raise HTTPException(
+                429,
+                f"Trade history is rate-limited (15 syncs per 3 hours). Try again "
+                f"in ~{mins} min — the dashboard auto-syncs in the background anyway.",
+            ) from None
+        if isinstance(e, httpx.HTTPStatusError):
+            code = e.response.status_code
+            if code in (401, 403):
+                _sync_status["error"] = "auth"
+                raise HTTPException(
+                    401,
+                    "Trade API rejected the request (401/403). Your POESESSID "
+                    "may be expired — refresh it in Settings.",
+                ) from None
+            if code == 404:
+                raise HTTPException(
+                    404,
+                    f"No history for league '{cfg.league}'. Check the league "
+                    "name in Settings.",
+                ) from None
+            raise HTTPException(502, f"Trade API error {code}.") from None
+        raise HTTPException(502, f"Could not reach trade API: {e}") from None
+
+    _sync_status.update(
+        last_success=time.time(),
+        last_new=result["new"],
+        total=result["total"],
+        error=None,
+    )
+    return result
+
+
+@app.get("/api/history/status")
+def history_status() -> dict:
+    """Sync status (last attempt/success, totals) for the auto-sync indicator."""
+    cfg = Config.load()
+    return {
+        **_sync_status,
+        "auto_sync_minutes": cfg.auto_sync_minutes,
+        "poesessid_set": bool(cfg.poesessid),
+    }
+
+
+@app.get("/api/history")
+def get_history_list() -> dict:
+    """Return all locally stored sales for the active league (newest first)."""
+    cfg = Config.load()
+    store = HistoryStore(cfg.cache_dir)
+    sales = store.all(cfg.league)
+    rates = _exalted_rates(cfg)
+
+    return {
+        "league": cfg.league,
+        "count": len(sales),
+        "sales": [_sale_to_dict(s, rates) for s in sales],
+    }
+
+
+@app.get("/api/history/summary")
+def get_history_summary() -> dict:
+    """Return dashboard aggregates for the active league."""
+    cfg = Config.load()
+    store = HistoryStore(cfg.cache_dir)
+    sales = store.all(cfg.league)
+    summary = summarize(sales, _exalted_rates(cfg))
+    return summary.to_dict()
+
+
+@app.post("/api/history/clear")
+def clear_history() -> dict:
+    cfg = Config.load()
+    store = HistoryStore(cfg.cache_dir)
+    store.clear(cfg.league)
+    return {"status": "cleared", "league": cfg.league}
+
+
+# ── boots sale-tracker ─────────────────────────────────────────────────
+
+
+@app.get("/api/tracker")
+def get_tracker() -> dict:
+    """Boots sale-tracker report for the Tracker tab: inferred clearing prices
+    per mod-bucket (calibrated against real sales), plus stale-listing ceilings.
+    Read-only — just queries tracker.db; prices are returned in divine."""
+    import time
+
+    from . import tracker as tk
+
+    cfg = Config.load()
+    rates = _exalted_rates(cfg)
+    div = rates.get("divine", 1.0) or 1.0
+    store = tk.TrackerStore(cfg.cache_dir)
+    cal = tk.calibrate(cfg)
+    cf = cal["global_factor"]
+
+    def to_d(ex: float) -> float:
+        return round(ex / div, 2)
+
+    buckets = [
+        {
+            "mod_sig": r["mod_sig"],
+            "n_exits": r["n_exits"],
+            "exit_median_d": to_d(r["median_exit_ex"]),
+            "est_clear_d": to_d(r["median_exit_ex"] * cf),
+            "p25_d": to_d(r["p25_exit_ex"]),
+            "p75_d": to_d(r["p75_exit_ex"]),
+            "days_on_market": r["median_days_on_market"],
+            "reprice_down_pct": round(r["reprice_down_rate"] * 100),
+        }
+        for r in store.clearing_report(cfg.league)
+    ]
+    ceilings = [
+        {
+            "mod_sig": c["mod_sig"], "price_d": to_d(c["price_ex"]),
+            "age_days": c["age_days"], "tier": c["tier"], "reprice_downs": c["reprice_downs"],
+        }
+        for c in store.stale_ceilings(cfg.league)
+    ]
+
+    now = time.time()
+    items = []
+    for it in store.all_listings(cfg.league):
+        if it["defc"] not in tk.FOCUS_DEFENCE:
+            continue  # ES / EV / EV+ES only — ignore armour
+        age_d = round((now - it["first_seen"]) / 86400.0, 2)
+        items.append({
+            "base": it["base"], "defc": it["defc"], "sockets": it["sockets"],
+            "ms": it["ms"], "ms_explicit": it["ms_explicit"],
+            "ms_rune": it["ms"] > it["ms_explicit"], "chaos_res": it["chaos_res"],
+            "life": it["life"], "res": it["res"], "rarity": it["rarity"],
+            "corrupted": bool(it["corrupted"]), "runeforged": bool(it["runeforged"]),
+            "price_d": to_d(it["last_price_ex"]),
+            "min_d": to_d(it["min_price_ex"]), "max_d": to_d(it["max_price_ex"]),
+            "reprice_up": it["n_reprice_up"], "reprice_down": it["n_reprice_down"],
+            "sightings": it["n_sightings"], "status": it["status"],
+            "age_days": age_d,
+            "exit_d": to_d(it["exit_price_ex"]) if it["exit_price_ex"] is not None else None,
+        })
+    return {
+        "league": cfg.league,
+        "divine_price": round(div),
+        "interval_min": cfg.tracker_minutes,
+        "summary": store.summary(cfg.league),
+        "last_poll_ts": store.last_poll_ts(cfg.league),
+        "status": _tracker_status,
+        "calibration": {
+            "factor": round(cf, 2), "n_matched": cal["n_matched"],
+            "n_sold_buckets": cal["n_sold_buckets"], "n_exit_buckets": cal["n_exit_buckets"],
+        },
+        "buckets": buckets,
+        "ceilings": ceilings,
+        "items": items,
+    }
+
+
+# ── saved item observations ────────────────────────────────────────────
+
+
+@app.get("/api/observations")
+def observations_stats() -> dict:
+    """Counts of saved items, total and per category, for the active league."""
+    cfg = Config.load()
+    obs = ObservationStore(cfg.cache_dir)
+    return {
+        "league": cfg.league,
+        "total": obs.count(cfg.league),
+        "by_category": obs.category_counts(cfg.league),
+    }
+
+
+@app.post("/api/observations/clear")
+def clear_observations() -> dict:
+    cfg = Config.load()
+    ObservationStore(cfg.cache_dir).clear(cfg.league)
+    return {"status": "cleared", "league": cfg.league}
 
 
 # ── prompt interpretation ──────────────────────────────────────────────
@@ -325,7 +686,7 @@ class _InterpretedSearch(BaseModel):
 
 INTERPRET_SYSTEM = """You are a Path of Exile 2 trade search assistant. Convert \
 the user's plain-English item description into structured search parameters for \
-the poe2market tool, which ranks items by weighted stat value per chaos orb.
+the poe2market tool, which ranks items by weighted stat value per exalted orb.
 
 Rules:
 - `category` MUST be one of the valid category IDs listed below. Pick the most \
@@ -338,7 +699,7 @@ the natural phrasing that appears on items.
 important as weight 1"). Infer from emphasis in the prompt.
     - `min_value` is optional; only set when the user explicitly specifies a \
 minimum.
-- `min_price` / `max_price` in chaos orbs; only set when specified.
+- `min_price` / `max_price` in divine orbs; only set when specified.
 - `limit` defaults to 20.
 - `explanation` is a one-sentence summary of your interpretation.
 
@@ -436,6 +797,115 @@ def interpret_endpoint(req: InterpretRequest) -> dict:
         "limit": parsed.limit,
         "explanation": parsed.explanation,
     }
+
+
+# ── background auto-sync ───────────────────────────────────────────────
+
+_autosync_started = False
+
+
+def _autosync_loop() -> None:
+    """Periodically sync sale history so the dashboard stays current without the
+    user clicking. One request per interval keeps API load negligible; the
+    interval and on/off come from config (re-read each cycle so Settings changes
+    take effect without a restart)."""
+    import time
+
+    # Small initial delay so startup isn't blocked and the session is ready.
+    time.sleep(15)
+    while True:
+        cfg = Config.load()
+        interval = max(0, cfg.auto_sync_minutes)
+        if interval == 0:
+            time.sleep(60)  # disabled — re-check in a minute in case it's enabled
+            continue
+        if cfg.poesessid:
+            _sync_status["last_attempt"] = time.time()
+            try:
+                result = _perform_sync(cfg)
+                _sync_status.update(
+                    last_success=time.time(),
+                    last_new=result["new"],
+                    total=result["total"],
+                    error=None,
+                )
+            except Exception as e:  # never let the loop die
+                import httpx
+
+                from .api import RateLimited
+
+                if isinstance(e, RateLimited):
+                    _sync_status["error"] = "ratelimit"  # transient; next cycle retries
+                elif isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (401, 403):
+                    _sync_status["error"] = "auth"
+                else:
+                    _sync_status["error"] = "network"
+        time.sleep(interval * 60)
+
+
+@app.on_event("startup")
+def _start_autosync() -> None:
+    global _autosync_started
+    if _autosync_started:
+        return
+    _autosync_started = True
+    _sync_status["auto"] = True
+    import threading
+
+    threading.Thread(target=_autosync_loop, daemon=True, name="autosync").start()
+
+
+# ── background sale-tracker ────────────────────────────────────────────
+
+_tracker_started = False
+_tracker_status: dict = {"last_success": None, "offline": 0, "new": 0, "gone": 0, "error": None}
+
+
+def _tracker_loop() -> None:
+    """Periodically poll the boots market (OFFLINE-only) to track listing
+    lifecycles and infer real clearing prices. Interval from config
+    (``tracker_minutes``; 0 disables), re-read each cycle so Settings changes
+    take effect without a restart. Staggered after auto-sync so the two
+    background jobs don't burst the trade API at the same instant."""
+    import time
+
+    from . import tracker
+
+    time.sleep(25)
+    while True:
+        cfg = Config.load()
+        interval = max(0, cfg.tracker_minutes)
+        if interval == 0:
+            time.sleep(60)  # disabled — re-check in case it's re-enabled
+            continue
+        if cfg.poesessid and not tracker.recently_polled(cfg, interval):
+            _tracker_status["last_attempt"] = time.time()
+            try:
+                res = tracker.run_poll(cfg)
+                _tracker_status.update(last_success=time.time(), offline=res.offline,
+                                       new=res.new, gone=res.marked_gone, error=None)
+            except Exception as e:  # never let the loop die
+                import httpx
+
+                if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in (401, 403):
+                    _tracker_status["error"] = "auth"
+                else:
+                    _tracker_status["error"] = "network"
+        time.sleep(interval * 60)
+
+
+@app.on_event("startup")
+def _start_tracker() -> None:
+    global _tracker_started
+    if _tracker_started:
+        return
+    _tracker_started = True
+    import threading
+
+    cfg = Config.load()
+    print(f"[tracker] background sale-tracker started (every {cfg.tracker_minutes}m, "
+          f"offline-only)", flush=True)
+    threading.Thread(target=_tracker_loop, daemon=True, name="tracker").start()
 
 
 def run(host: str = "127.0.0.1", port: int = 8000, reload: bool = False) -> None:

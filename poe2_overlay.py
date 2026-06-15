@@ -6,8 +6,8 @@ Usage:
     python poe2_overlay.py 42         # start at step 42 (1-indexed)
 
 Global hotkeys (work while PoE2 is focused, Windows only):
-    Down arrow   next step
-    Up arrow     previous step
+    Right arrow / Shift+E   next step
+    Left arrow  / Shift+Q   previous step
 
 When the overlay itself is focused:
     Esc          save and quit
@@ -31,6 +31,37 @@ import tkinter as tk
 from pathlib import Path
 
 STATE_FILE = Path.home() / ".poe2_acts_guide_state.json"
+
+
+def _enable_dpi_awareness():
+    # Without this, Windows bitmap-upscales the tk window on high-DPI
+    # displays, which is the usual cause of blurry text in tkinter overlays.
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor v2
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def _system_dpi():
+    try:
+        return ctypes.windll.user32.GetDpiForSystem()
+    except Exception:
+        try:
+            hdc = ctypes.windll.user32.GetDC(0)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+            return dpi or 96
+        except Exception:
+            return 96
+
+
+_enable_dpi_awareness()
+DPI = _system_dpi()
 
 GUIDE = r"""
 ## Act 1
@@ -249,8 +280,23 @@ root.attributes("-alpha", alpha)
 root.attributes("-transparentcolor", TRANSP)
 root.configure(bg=BG)
 
+# Tell Tk to size point-based fonts at the real monitor DPI so text
+# renders crisply instead of being bitmap-upscaled by Windows.
+try:
+    root.tk.call("tk", "scaling", DPI / 72)
+except tk.TclError:
+    pass
+
+# Migrate the saved pixel-size geometry across DPI changes (e.g., the
+# very first run after enabling DPI awareness, or moving to a different
+# monitor) so the window stays the same physical size on screen.
+saved_dpi = saved.get("dpi", 96)
 ww, hh = saved.get("size", [300, 100])
 xx, yy = saved.get("pos", [120, 120])
+if saved_dpi and saved_dpi != DPI:
+    ratio = DPI / saved_dpi
+    ww = max(180, int(ww * ratio))
+    hh = max(70, int(hh * ratio))
 root.geometry(f"{ww}x{hh}+{xx}+{yy}")
 font_sz = saved.get("font", 9)
 
@@ -290,7 +336,7 @@ def _btn(parent, text, cmd):
 btn_bar = tk.Frame(frame, bg=BG)
 
 foot = tk.Label(
-    frame, text="↑/↓ step   M drag   [ ] font   , . alpha   Esc quit",
+    frame, text="←/→ or Shift+Q/E step   M drag   [ ] font   , . alpha   Esc quit",
     bg=BG, fg=FG_DIM, font=("Segoe UI", 7), anchor="w",
 )
 
@@ -319,6 +365,7 @@ def persist():
             "size":  [root.winfo_width(), root.winfo_height()],
             "font":  font_sz,
             "alpha": alpha,
+            "dpi":   DPI,
         })
     except tk.TclError:
         pass
@@ -502,22 +549,27 @@ root.bind("<period>", alpha_up)
 
 
 def _poll_keys():
-    """Edge-triggered global polling for arrow keys (Windows)."""
-    VK_DOWN, VK_UP = 0x28, 0x26
+    """Edge-triggered global polling for arrow keys + Shift+Q/E (Windows)."""
+    VK_LEFT, VK_RIGHT = 0x25, 0x27
+    VK_SHIFT = 0x10
+    VK_Q, VK_E = 0x51, 0x45
     try:
         u32 = ctypes.windll.user32
     except Exception:
         return
-    prev_d = prev_u = 0
+    prev_right = prev_left = prev_fwd = prev_back = 0
     while True:
         try:
-            d = u32.GetAsyncKeyState(VK_DOWN) & 0x8000
-            u = u32.GetAsyncKeyState(VK_UP) & 0x8000
-            if d and not prev_d:
+            shift = u32.GetAsyncKeyState(VK_SHIFT) & 0x8000
+            right = u32.GetAsyncKeyState(VK_RIGHT) & 0x8000
+            left = u32.GetAsyncKeyState(VK_LEFT) & 0x8000
+            fwd = (u32.GetAsyncKeyState(VK_E) & 0x8000) and shift
+            back = (u32.GetAsyncKeyState(VK_Q) & 0x8000) and shift
+            if (right and not prev_right) or (fwd and not prev_fwd):
                 root.after(0, step_next)
-            if u and not prev_u:
+            if (left and not prev_left) or (back and not prev_back):
                 root.after(0, step_prev)
-            prev_d, prev_u = d, u
+            prev_right, prev_left, prev_fwd, prev_back = right, left, fwd, back
             time.sleep(0.04)
         except Exception:
             break

@@ -17,3 +17,14 @@ env/
 .ruff_cache/
 *.db
 config.toml
+
+# Personal market-research data: your sales/comps + other players' account names
+research_data/
+*.jsonl
+*.output
+
+# Local machine/agent state (keep .claude/skills, drop local settings)
+.claude/settings.json
+.claude/settings.local.json
+serve.log
+serve.err

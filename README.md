@@ -9,6 +9,7 @@ The official trade site lets you set hard thresholds ("life >= 80, fire res >= 3
 - **Analyze** a market segment to see how each stat affects price (linear regression over current listings)
 - **Find deals** by specifying stats you care about with importance weights, then ranking items by value-per-chaos
 - **Search stats** by name to find the right filter IDs
+- **Sale history dashboard** — track everything your hideout merchant has sold: cumulative income over time, daily earnings, currency breakdown, and a searchable/sortable table of individual items
 
 ## Install
 
@@ -22,14 +23,28 @@ Grab your `POESESSID` from browser devtools (pathofexile.com → Application →
 
 ```bash
 poe2market config --poesessid "your_session_id_here"
-poe2market config --league "Fate of the Vaal"
+poe2market config --league "Runes of Aldur"
 ```
 
 Or use environment variables:
 ```bash
 export POE2_SESSID="your_session_id_here"
-export POE2_LEAGUE="Fate of the Vaal"
+export POE2_LEAGUE="Runes of Aldur"
 ```
+
+## One-click launcher (macro + dashboard)
+
+To start the PoE2 macro overlay **and** the web dashboard together from a single
+action, run the launcher (or double-click `start_poe2.bat` on Windows):
+
+```bash
+python poe2_launcher.py
+```
+
+It opens the dashboard at http://127.0.0.1:8000 (which auto-syncs your sale
+history in the background) and brings up the macro overlay (Shift+4 toggle,
+Shift+5 quit). Quitting the overlay shuts the dashboard down too. Flags:
+`--no-macro` (dashboard only), `--no-web` (macro only), `--port`, `--no-open`.
 
 ## Web UI
 
@@ -37,11 +52,31 @@ export POE2_LEAGUE="Fate of the Vaal"
 poe2market serve
 ```
 
-Opens a local web interface at `http://localhost:8000` with three tabs:
+The dashboard opens on the **Sale History** tab by default. Sale history
+**auto-syncs** in the background every 20 minutes (configurable in Settings; one
+request per cycle, set 0 to disable), and the open page refreshes itself when new
+sales arrive. A status dot shows when it last synced.
+
+Opens a local web interface at `http://localhost:8000` with these tabs:
 
 - **Find Deals** — pick a category, search for stats (with autocomplete), set importance weights, and get a ranked list of best-value listings with stat contribution breakdown and one-click whisper copy. Includes a natural-language prompt box ("body armour with high life and fire resistance under 300 chaos") that uses Claude to fill in the form automatically.
 - **Analyze Market** — see a visual breakdown of which stats are driving prices, with regression bars showing relative impact.
+- **Sale History** — your completed merchant sales as a dashboard: total earned (divine/chaos), cumulative income chart, per-day income, currency breakdown, and a searchable, sortable table of every item sold. Click **Sync now** to pull the latest sales; data is stored locally so history accrues beyond the API's ~100-sale window. Sync after each play session for a complete record.
 - **Settings** — configure POESESSID, league, cache, Anthropic API key.
+
+### Sale history
+
+PoE2 exposes your recent hideout-merchant sales at `GET /api/trade2/history/{league}` (the same POESESSID-authenticated endpoint the trade site's History page uses). The server only returns the last ~100 sales, so this tool persists each sync into a local SQLite store (`history.db` in the cache dir), deduped by sale id, so your record grows over time.
+
+From the CLI:
+
+```bash
+poe2market history              # sync the latest sales and print a summary
+poe2market history --no-sync    # show stored history without hitting the API
+poe2market history -n 50        # show 50 rows
+```
+
+Monetary totals use approximate chaos/divine conversion rates (see `scorer.py`), so treat "net worth" figures as estimates rather than exact values.
 
 ### Prompt interpretation (optional)
 

@@ -4,10 +4,20 @@
 poesessid = ""
 
 # Trade league to search
-league = "Fate of the Vaal"
+league = "Runes of Aldur"
 
 # How long to cache API responses (hours)
 cache_ttl_hours = 24
 
 # Max items to fetch per search (more = slower but better regression)
 max_fetch_items = 200
+
+# Background sale-history sync interval, minutes (0 disables)
+auto_sync_minutes = 20
+
+# Boots sale-tracker poll interval, minutes (0 disables)
+tracker_minutes = 13
+
+# Optional: Anthropic API key for the natural-language Deals prompt
+anthropic_api_key = ""
+anthropic_model = "claude-opus-4-6"

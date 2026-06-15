@@ -4,8 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>poe2market</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script defer src="/static/app.js"></script>
+  <link rel="stylesheet" href="/static/style.css?v=4">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script defer src="/static/app.js?v=4"></script>
   <script defer src="https://unpkg.com/alpinejs@3.13.3/dist/cdn.min.js"></script>
 </head>
 <body x-data="app()" x-cloak>
@@ -14,8 +15,10 @@
     <div class="container header-inner">
       <h1>poe2market</h1>
       <nav>
+        <button @click="showHistory()" :class="{active: tab === 'history'}">Sale History</button>
         <button @click="tab = 'deals'" :class="{active: tab === 'deals'}">Find Deals</button>
         <button @click="tab = 'analyze'" :class="{active: tab === 'analyze'}">Analyze Market</button>
+        <button @click="showTracker()" :class="{active: tab === 'tracker'}">Tracker</button>
         <button @click="tab = 'settings'" :class="{active: tab === 'settings'}">Settings</button>
       </nav>
     </div>
@@ -36,7 +39,7 @@
     <!-- ── FIND DEALS ────────────────────────────────────────────── -->
     <section class="panel" x-show="tab === 'deals'">
       <h2>Find Best-Value Items</h2>
-      <p class="muted">Specify stats you care about with importance weights. Items are ranked by weighted stat score ÷ chaos-equivalent price.</p>
+      <p class="muted">Specify stats you care about with importance weights. Items are ranked by weighted stat score ÷ exalted-equivalent price.</p>
 
       <!-- AI prompt box -->
       <div class="prompt-section">
@@ -44,7 +47,7 @@
         <div class="prompt-row">
           <textarea
             x-model="promptText"
-            placeholder="e.g., body armour with lots of life and fire resistance, under 300 chaos"
+            placeholder="e.g., body armour with lots of life and fire resistance, under 500 exalted"
             rows="2"
             @keydown.ctrl.enter="interpretPrompt()"
             @keydown.meta.enter="interpretPrompt()"></textarea>
@@ -83,6 +86,20 @@
             </optgroup>
           </template>
         </select>
+      </div>
+
+      <div class="form-group">
+        <label>Base attributes <span class="muted small">(optional — e.g. Dex + Int = evasion / energy-shield bases)</span></label>
+        <div class="attr-toggles">
+          <template x-for="a in attrOptions" :key="a.key">
+            <button type="button" class="attr-toggle"
+                    :class="{active: dealsForm.attributes.includes(a.key)}"
+                    @click="toggleAttr(dealsForm, a.key)">
+              <span x-text="a.label"></span>
+              <small x-text="a.sub"></small>
+            </button>
+          </template>
+        </div>
       </div>
 
       <div class="form-group">
@@ -135,11 +152,11 @@
 
       <div class="form-row">
         <div class="form-group">
-          <label>Min price (chaos)</label>
+          <label>Min price (divine)</label>
           <input type="number" x-model.number="dealsForm.min_price" placeholder="any">
         </div>
         <div class="form-group">
-          <label>Max price (chaos)</label>
+          <label>Max price (divine)</label>
           <input type="number" x-model.number="dealsForm.max_price" placeholder="any">
         </div>
         <div class="form-group">
@@ -181,8 +198,8 @@
                     <span x-text="formatPrice(deal.price)"></span>
                     <span class="currency" x-text="deal.currency"></span>
                   </div>
-                  <small x-text="'~' + Math.round(deal.chaos_price) + 'c'"
-                         x-show="deal.currency !== 'chaos'"></small>
+                  <small x-text="formatExaltedEq(deal)"
+                         x-show="deal.currency !== 'exalted'"></small>
                 </div>
               </div>
 
@@ -233,7 +250,7 @@
     <!-- ── ANALYZE MARKET ────────────────────────────────────────── -->
     <section class="panel" x-show="tab === 'analyze'">
       <h2>Analyze Stat-Price Relationships</h2>
-      <p class="muted">Linear regression over current listings. Shows how much each stat point contributes to price on average.</p>
+      <p class="muted">Linear regression over current listings, sampled across price bands so the fit sees real price variation. Shows how much each stat point contributes to price (in exalted) on average.</p>
 
       <div class="form-group">
         <label>Category</label>
@@ -249,14 +266,25 @@
         </select>
       </div>
 
+      <div class="form-group">
+        <label>Base attributes <span class="muted small">(optional — e.g. Dex + Int = evasion / energy-shield bases)</span></label>
+        <div class="attr-toggles">
+          <template x-for="a in attrOptions" :key="a.key">
+            <button type="button" class="attr-toggle"
+                    :class="{active: analyzeForm.attributes.includes(a.key)}"
+                    @click="toggleAttr(analyzeForm, a.key)">
+              <span x-text="a.label"></span>
+              <small x-text="a.sub"></small>
+            </button>
+          </template>
+        </div>
+      </div>
+
       <div class="form-row">
         <div class="form-group">
-          <label>Min price (chaos)</label>
-          <input type="number" x-model.number="analyzeForm.min_price" placeholder="any">
-        </div>
-        <div class="form-group">
-          <label>Max price (chaos)</label>
-          <input type="number" x-model.number="analyzeForm.max_price" placeholder="any">
+          <label>Cheapest item to include (divine)</label>
+          <input type="number" step="0.5" min="0" x-model.number="analyzeForm.min_divine" placeholder="1">
+          <p class="muted small">Floors the sample so sub-divine junk doesn't drown out the signal.</p>
         </div>
         <div class="form-group">
           <label>Max items</label>
@@ -265,7 +293,16 @@
         <div class="form-group">
           <label>Min occurrence (0-1)</label>
           <input type="number" step="0.05" min="0" max="1" x-model.number="analyzeForm.min_occurrence">
+          <p class="muted small">Drop stats appearing in fewer than this fraction of items.</p>
         </div>
+      </div>
+
+      <div class="form-group">
+        <label class="checkbox-row">
+          <input type="checkbox" x-model="analyzeForm.use_history">
+          <span>Use saved item history</span>
+        </label>
+        <p class="muted small">Every search saves the items it fetches. With this on, the regression runs over your whole accumulated sample for this category — so it gets better the more you search, beyond the ~100-per-search API cap.</p>
       </div>
 
       <div class="submit-row">
@@ -276,9 +313,15 @@
       </div>
 
       <div class="results" x-show="analyzeResult">
+        <div class="banner warning" x-show="analyzeResult?.note">
+          <span x-text="analyzeResult?.note"></span>
+        </div>
         <h3>Stat Price Impact</h3>
         <p class="muted small">
-          Based on <span x-text="analyzeResult?.listings_count"></span> listings.
+          Based on <span x-text="analyzeResult?.listings_count"></span> listings
+          spanning <span x-text="analyzeResult?.price_min"></span>–<span x-text="analyzeResult?.price_max"></span> ex
+          (<span x-text="analyzeResult?.fetched_now"></span> fetched now;
+          <span x-text="analyzeResult?.saved_total"></span> saved for this category).
           Positive = stat increases price; negative = noise or inverse correlation.
         </p>
 
@@ -292,7 +335,7 @@
               </div>
               <div class="coeff-value" :class="c.coefficient > 0 ? 'good' : 'bad'">
                 <span x-text="(c.coefficient >= 0 ? '+' : '') + c.coefficient.toFixed(2)"></span>
-                <small>c/pt</small>
+                <small>ex/pt</small>
               </div>
               <div class="coeff-meta">
                 <small x-text="'±' + c.std_error.toFixed(1) + ' · n=' + c.sample_count"></small>
@@ -300,6 +343,358 @@
             </div>
           </template>
         </div>
+      </div>
+    </section>
+
+    <!-- ── SALE HISTORY ──────────────────────────────────────────── -->
+    <section class="panel" x-show="tab === 'history'">
+      <div class="history-head">
+        <div>
+          <h2>Sale History</h2>
+          <p class="muted">Your completed hideout-merchant sales in <strong x-text="config.league"></strong>, pulled from the trade API and kept locally so history accrues past the server's ~100-sale window.</p>
+          <p class="sync-line small" x-show="syncStatus">
+            <span class="sync-dot" :class="syncDotClass()"></span>
+            <span x-text="syncStatusText()"></span>
+          </p>
+        </div>
+        <div class="history-actions">
+          <button class="primary" @click="syncHistory()" :disabled="historyLoading">
+            <span x-show="!historyLoading">⟳ Sync now</span>
+            <span x-show="historyLoading"><span class="spinner"></span> Syncing…</span>
+          </button>
+          <select x-model="historyUnit" @change="renderCharts()" title="Display unit">
+            <option value="divine">Divine</option>
+            <option value="exalted">Exalted</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="banner success" x-show="syncMessage" x-transition>
+        <span x-text="syncMessage"></span>
+        <button class="close" @click="syncMessage = ''">×</button>
+      </div>
+
+      <div class="empty-state" x-show="!historyLoading && (!summary || summary.count === 0)">
+        <p>No sales stored yet.</p>
+        <p class="muted small">Open the in-game merchant history at least once, then click <strong>Sync now</strong>. Sync periodically (e.g. after each play session) to build a complete record.</p>
+      </div>
+
+      <template x-if="summary && summary.count > 0">
+        <div>
+          <!-- summary cards -->
+          <div class="stat-cards">
+            <div class="stat-card accent">
+              <div class="stat-card-label">Total earned</div>
+              <div class="stat-card-value" x-text="totalDisplay()"></div>
+              <div class="stat-card-sub" x-text="totalAltDisplay()"></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-label">Sales</div>
+              <div class="stat-card-value" x-text="summary.count"></div>
+              <div class="stat-card-sub" x-text="dateRangeLabel()"></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-label">Average sale</div>
+              <div class="stat-card-value" x-text="unitValue(summary.avg_exalted)"></div>
+              <div class="stat-card-sub" x-text="'median ' + unitValue(summary.median_exalted)"></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-label">Biggest sale</div>
+              <div class="stat-card-value" x-text="unitValue(summary.max_sale_exalted)"></div>
+              <div class="stat-card-sub" x-text="summary.max_sale_label" :title="summary.max_sale_label"></div>
+            </div>
+          </div>
+
+          <!-- net worth over time -->
+          <h3>Cumulative income over time</h3>
+          <p class="muted small">Realized proceeds from sales, accumulated. Not stash value — it only counts items the merchant has sold.</p>
+          <div class="chart-box"><canvas id="chart-cumulative"></canvas></div>
+
+          <!-- daily + currency -->
+          <div class="chart-grid">
+            <div>
+              <h3>Income per day</h3>
+              <div class="chart-box short"><canvas id="chart-daily"></canvas></div>
+            </div>
+            <div>
+              <h3>By currency received</h3>
+              <div class="chart-box short"><canvas id="chart-currency"></canvas></div>
+            </div>
+          </div>
+
+          <!-- item table -->
+          <h3>Items sold</h3>
+          <div class="table-controls">
+            <input type="text" x-model="historyFilter" placeholder="Filter by item name or base…" class="filter-input">
+            <span class="muted small" x-text="filteredSales.length + ' of ' + sales.length + ' shown'"></span>
+          </div>
+          <div class="sales-table-wrap">
+            <table class="sales-table">
+              <thead>
+                <tr>
+                  <th @click="sortBy('time')" class="sortable">Time <span x-text="sortIndicator('time')"></span></th>
+                  <th>Item</th>
+                  <th @click="sortBy('rarity')" class="sortable">Rarity <span x-text="sortIndicator('rarity')"></span></th>
+                  <th class="num">iLvl</th>
+                  <th @click="sortBy('price')" class="sortable num">Price <span x-text="sortIndicator('price')"></span></th>
+                  <th @click="sortBy('value')" class="sortable num"><span x-text="historyUnit === 'divine' ? 'Divine eq.' : 'Exalted eq.'"></span> <span x-text="sortIndicator('value')"></span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="s in pagedSales" :key="s.sale_id">
+                  <tr>
+                    <td class="dim small" x-text="formatTime(s.time)"></td>
+                    <td>
+                      <div class="sale-item">
+                        <img :src="s.icon" x-show="s.icon" loading="lazy" class="sale-icon" alt="">
+                        <div class="sale-item-main">
+                          <div class="sale-name-row" :class="{clickable: s.has_detail}" @click="s.has_detail && (s._open = !s._open)">
+                            <span class="caret" x-show="s.has_detail" x-text="s._open ? '▾' : '▸'"></span>
+                            <span class="sale-name" :class="'rarity-' + (s.rarity || 'normal').toLowerCase()" x-text="s.name || s.base_type"></span>
+                          </div>
+                          <small class="dim" x-show="s.name && s.base_type" x-text="s.base_type"></small>
+
+                          <div class="item-detail" x-show="s._open" x-transition>
+                            <div class="mod-block" x-show="s.properties.length">
+                              <template x-for="p in s.properties" :key="p"><div class="mod-prop" x-text="p"></div></template>
+                            </div>
+                            <div class="mod-sep" x-show="s.ilvl">Item Level: <span x-text="s.ilvl"></span></div>
+                            <div class="mod-block" x-show="s.enchant_mods.length">
+                              <template x-for="m in s.enchant_mods" :key="m"><div class="mod-enchant" x-text="m"></div></template>
+                            </div>
+                            <div class="mod-block" x-show="s.implicit_mods.length">
+                              <template x-for="m in s.implicit_mods" :key="m"><div class="mod-implicit" x-text="m"></div></template>
+                            </div>
+                            <div class="mod-block" x-show="s.fractured_mods.length">
+                              <template x-for="m in s.fractured_mods" :key="m"><div class="mod-fractured" x-text="m"></div></template>
+                            </div>
+                            <div class="mod-block" x-show="s.explicit_mods.length">
+                              <template x-for="m in s.explicit_mods" :key="m"><div class="mod-explicit" x-text="m"></div></template>
+                            </div>
+                            <div class="mod-block" x-show="s.rune_mods.length">
+                              <template x-for="m in s.rune_mods" :key="m"><div class="mod-rune" x-text="m"></div></template>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="small" :class="'rarity-' + (s.rarity || 'normal').toLowerCase()" x-text="s.rarity || '—'"></td>
+                    <td class="num dim" x-text="s.ilvl || '—'"></td>
+                    <td class="num">
+                      <span x-text="formatPrice(s.amount)"></span>
+                      <span class="currency" x-text="s.currency"></span>
+                    </td>
+                    <td class="num accent-text" x-text="unitValue(s.exalted_value)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager" x-show="filteredSales.length > pageSize">
+            <button class="small" @click="page = Math.max(0, page - 1)" :disabled="page === 0">← Prev</button>
+            <span class="muted small">Page <span x-text="page + 1"></span> / <span x-text="pageCount"></span></span>
+            <button class="small" @click="page = Math.min(pageCount - 1, page + 1)" :disabled="page >= pageCount - 1">Next →</button>
+          </div>
+
+          <div class="history-footer">
+            <button class="secondary small" @click="clearHistory()">Clear stored history for this league</button>
+          </div>
+        </div>
+      </template>
+    </section>
+
+    <!-- ── TRACKER ───────────────────────────────────────────────── -->
+    <section class="panel" x-show="tab === 'tracker'">
+      <h2>Boots Clearing-Price Tracker</h2>
+      <p class="muted">
+        Infers what chase boots actually <em>sell</em> for (not just asking prices) by polling the
+        offline market every <span x-text="tracker?.interval_min ?? 13"></span> min and watching listings
+        disappear. Focused on your products — dex / dex-int bases, 2-socket weighted.
+      </p>
+
+      <div class="banner info" x-show="tracker">
+        <div style="flex:1">
+          <span x-show="!tracker?.status?.error">
+            Last poll <strong x-text="agoMin(tracker?.last_poll_ts)"></strong> ·
+            tracking <strong x-text="tracker?.summary?.tracked ?? 0"></strong> listings
+            (<span x-text="tracker?.summary?.two_socket ?? 0"></span> two-socket) ·
+            <strong x-text="tracker?.summary?.gone ?? 0"></strong> cleared ·
+            <span x-text="tracker?.summary?.polls ?? 0"></span> polls
+          </span>
+          <span x-show="tracker?.status?.error" class="accent-text"
+                x-text="'Tracker error: ' + tracker?.status?.error + ' (is POESESSID valid?)'"></span>
+        </div>
+        <button class="small secondary" @click="refreshTracker()" :disabled="trackerLoading"
+                x-text="trackerLoading ? 'Loading…' : 'Refresh'"></button>
+      </div>
+
+      <p class="muted small" x-show="tracker">
+        <template x-if="tracker?.calibration?.n_matched">
+          <span>Estimates calibrated <strong x-text="'×' + tracker.calibration.factor"></strong>
+            against <span x-text="tracker.calibration.n_matched"></span> of your sold buckets
+            (exit price → real clearing price).</span>
+        </template>
+        <template x-if="tracker && !tracker.calibration.n_matched">
+          <span>Calibration pending — no overlap yet between tracked sales and your history
+            (<span x-text="tracker.calibration.n_exit_buckets"></span> cleared buckets,
+            <span x-text="tracker.calibration.n_sold_buckets"></span> of your sold buckets). Showing raw exit prices.</span>
+        </template>
+      </p>
+
+      <h3>Inferred clearing prices by mod-bucket</h3>
+      <p class="muted small" x-show="tracker && !tracker.buckets.length">
+        No cleared listings yet — the tracker needs a day or so of polling. A listing must vanish for
+        2 consecutive polls (~<span x-text="(tracker?.interval_min ?? 13) * 2"></span> min) to count as sold.
+      </p>
+      <table class="sales-table" x-show="tracker && tracker.buckets.length">
+        <thead>
+          <tr>
+            <th>Mod bucket</th>
+            <th class="num">Sold (n)</th>
+            <th class="num">Exit median</th>
+            <th class="num">Est. clearing</th>
+            <th class="num">p25–p75</th>
+            <th class="num">Days listed</th>
+            <th class="num">Cut %</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="b in (tracker?.buckets || [])" :key="b.mod_sig">
+            <tr>
+              <td x-text="b.mod_sig"></td>
+              <td class="num" x-text="b.n_exits"></td>
+              <td class="num currency" x-text="b.exit_median_d + 'd'"></td>
+              <td class="num accent-text" x-text="b.est_clear_d + 'd'"></td>
+              <td class="num currency" x-text="b.p25_d + '–' + b.p75_d"></td>
+              <td class="num" x-text="b.days_on_market"></td>
+              <td class="num" x-text="b.reprice_down_pct + '%'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+
+      <h3>Stale listings (sitting unsold = soft price ceilings)</h3>
+      <p class="muted small" x-show="tracker && !tracker.ceilings.length">
+        None yet — nothing has sat unsold for 12h+ since tracking began.
+      </p>
+      <table class="sales-table" x-show="tracker && tracker.ceilings.length">
+        <thead>
+          <tr>
+            <th>Mod bucket</th>
+            <th>Sat</th>
+            <th class="num">Asking</th>
+            <th class="num">Age (days)</th>
+            <th class="num">Price cuts</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="c in (tracker?.ceilings || [])" :key="c.mod_sig + c.price_d + c.age_days">
+            <tr>
+              <td x-text="c.mod_sig"></td>
+              <td><span class="badge" :class="'tier-' + c.tier.replace('+','')" x-text="c.tier"></span></td>
+              <td class="num currency" x-text="c.price_d + 'd'"></td>
+              <td class="num" x-text="c.age_days"></td>
+              <td class="num" x-text="c.reprice_downs"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+
+      <h3>All tracked items
+        <span class="muted small" x-show="tracker">(<span x-text="filteredItems().length"></span>
+          of <span x-text="tracker?.items?.length ?? 0"></span>)</span>
+      </h3>
+      <div class="tracker-filters" x-show="tracker">
+        <input type="text" placeholder="search base…" x-model="trackerFilter.q" style="max-width:160px">
+        <select x-model="trackerFilter.status">
+          <option value="all">all status</option>
+          <option value="active">active</option>
+          <option value="gone">sold / gone</option>
+        </select>
+        <select x-model="trackerFilter.sockets">
+          <option value="all">any sockets</option>
+          <option value="2">2-socket</option>
+          <option value="1">1-socket</option>
+        </select>
+        <select x-model="trackerFilter.defc">
+          <option value="all">any defence</option>
+          <option value="EV">EV (dex)</option>
+          <option value="EV+ES">EV+ES (dex-int)</option>
+          <option value="ES">ES</option>
+          <option value="AR">AR</option>
+          <option value="AR+EV">AR+EV</option>
+          <option value="AR+ES">AR+ES</option>
+        </select>
+        <select x-model="trackerFilter.sort">
+          <option value="price_desc">price ↓</option>
+          <option value="price_asc">price ↑</option>
+          <option value="age">oldest</option>
+          <option value="cuts">most price cuts</option>
+        </select>
+      </div>
+      <table class="sales-table" x-show="tracker && tracker.items.length">
+        <thead>
+          <tr>
+            <th>Base</th>
+            <th>Def</th>
+            <th class="num">Sk</th>
+            <th class="num">MS</th>
+            <th class="num">Life</th>
+            <th class="num">Res</th>
+            <th class="num">Chaos</th>
+            <th class="num">Rar</th>
+            <th class="num">Price</th>
+            <th class="num">Range</th>
+            <th class="num">Reprice</th>
+            <th class="num">Age</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="(it, i) in filteredItems().slice(0, trackerLimit)" :key="i">
+            <tr>
+              <td>
+                <span x-text="it.base"></span>
+                <span class="tag" x-show="it.corrupted" title="corrupted">C</span>
+                <span class="tag rf" x-show="it.runeforged" title="runeforged">RF</span>
+              </td>
+              <td><span class="badge" x-text="it.defc"></span></td>
+              <td class="num">
+                <span :class="{'badge two-sock': it.sockets >= 2}" x-text="it.sockets"></span>
+              </td>
+              <td class="num" :class="{'accent-text': it.ms >= 36}">
+                <span x-text="it.ms + '%'"></span>
+                <span class="tag rune" x-show="it.ms_rune"
+                      :title="'explicit ' + it.ms_explicit + '% + 5% rune'"
+                      x-text="it.ms_explicit + '+r'"></span>
+              </td>
+              <td class="num" x-text="it.life || '·'"></td>
+              <td class="num" x-text="it.res ? it.res + '%' : '·'"></td>
+              <td class="num" :class="{'accent-text': it.chaos_res >= 8}"
+                  x-text="it.chaos_res ? it.chaos_res + '%' : '·'"></td>
+              <td class="num" x-text="it.rarity ? it.rarity + '%' : '·'"></td>
+              <td class="num accent-text" x-text="it.price_d + 'd'"></td>
+              <td class="num currency"
+                  x-text="it.min_d === it.max_d ? '—' : (it.min_d + '–' + it.max_d)"></td>
+              <td class="num">
+                <span class="good" x-show="it.reprice_up" x-text="'↑' + it.reprice_up"></span>
+                <span class="bad" x-show="it.reprice_down" x-text="'↓' + it.reprice_down"></span>
+                <span class="muted" x-show="!it.reprice_up && !it.reprice_down">·</span>
+              </td>
+              <td class="num" x-text="it.age_days < 1 ? Math.round(it.age_days*24)+'h' : it.age_days.toFixed(1)+'d'"></td>
+              <td>
+                <span class="badge active" x-show="it.status === 'active'">live</span>
+                <span class="badge gone" x-show="it.status === 'gone'"
+                      :title="'last seen ' + (it.exit_d ?? it.price_d) + 'd'">sold?</span>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      <div style="text-align:center; margin-top:12px"
+           x-show="tracker && filteredItems().length > trackerLimit">
+        <button class="secondary small" @click="trackerLimit += 200"
+                x-text="'Show more (' + (filteredItems().length - trackerLimit) + ' hidden)'"></button>
       </div>
     </section>
 
@@ -336,6 +731,12 @@
         <label>Max items to fetch per search</label>
         <input type="number" x-model.number="settingsForm.max_fetch_items" min="10" max="1000">
         <p class="muted small">More items = better regression/more deals, but slower (rate-limited API).</p>
+      </div>
+
+      <div class="form-group">
+        <label>Auto-sync sale history every (minutes)</label>
+        <input type="number" x-model.number="settingsForm.auto_sync_minutes" min="0" max="240">
+        <p class="muted small">Background refresh of your sale history. One request per cycle — keep it ≥15 to be gentle on the API. Set 0 to disable.</p>
       </div>
 
       <div class="form-group">

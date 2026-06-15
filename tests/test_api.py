@@ -52,7 +52,8 @@ def test_build_query_price_range():
     price = q["query"]["filters"]["trade_filters"]["filters"]["price"]
     assert price["min"] == 10
     assert price["max"] == 500
-    assert price["option"] == "chaos"
+    # MUST be divine — exalted price option silently misses divine-listed items
+    assert price["option"] == "divine"
 
 
 def test_build_query_stat_filters():
@@ -69,9 +70,15 @@ def test_build_query_stat_filters():
     assert len(group["filters"]) == 2
 
 
-def test_build_query_online_flag():
-    q_online = build_search_query(online_only=True)
-    assert q_online["query"]["status"]["option"] == "online"
+def test_build_query_always_any_status():
+    # always "any" — offline-only is enforced downstream via is_offline()
+    q = build_search_query(category="armour.boots")
+    assert q["query"]["status"]["option"] == "any"
 
-    q_any = build_search_query(online_only=False)
-    assert q_any["query"]["status"]["option"] == "any"
+
+def test_is_offline_filter():
+    from poe2market.api import is_offline
+    online = {"listing": {"account": {"name": "x", "online": {"league": "L"}}}}
+    offline = {"listing": {"account": {"name": "y"}}}
+    assert is_offline(offline) is True
+    assert is_offline(online) is False
